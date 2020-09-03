@@ -1,0 +1,91 @@
+
+//=================定义公用信息===============
+//harbor地址
+def harborUrl = "192.168.38.100"
+//harbor仓库名称
+def harborRepository = "springcloud"
+//构建版本tag
+def tag = "latest"
+//harbor凭证
+def harborAuth = "dd671782-a857-4884-8307-f1084aef867d"
+
+
+
+//定义函数，获取有效的服务
+def getValidServerList(){
+	 //需要构建的服务名
+	 def buildServerNames = ['teacher-server']
+     //所有服务列表
+	 def springCloudServers= [['serverName':'gateway-server','serverPort':9000],
+	                          ['serverName':'student-server','serverPort':8001],
+	                          ['serverName':'teacher-server','serverPort':8002]]
+     //返回结果集
+     def rs=[];
+     for(int i=0;i<buildServerNames.size();i++){
+            for(int j=0;j<springCloudServers.size();j++){
+              if("${buildServerNames[i]}" == "${springCloudServers[j].serverName}"){
+                  rs.add(springCloudServers[j])
+             }
+        }
+     }
+	 return rs;
+}
+
+
+
+node  {
+
+    //有效的服务列表
+    def validServerList=getValidServerList()
+
+	stage('拉取代码') {
+		  checkout([$class: 'GitSCM', branches: [[name: '*/develop']], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: '0543fa76-913f-4600-9a3b-30ac70c0fc86', url: 'git@192.168.38.45:root/springcloud-demo.git']]])
+	}
+
+	stage('制作镜像,上传harbor'){
+       for(int i=0;i<validServerList.size();i++){
+            echo "制作镜像: ${validServerList[i].serverName}"
+       		//服务名称
+       		def serverName = "${validServerList[i].serverName}"
+       		//每次构建前，清除上次构建的镜像
+       		sh "/usr/local/shell/jenkins/clearImages.sh  ${serverName}"
+       		//打包，构建镜像
+       		sh "mvn -f ${serverName} clean package dockerfile:build"
+       		// 定义镜像名称
+       		def imageName="${serverName}:${tag}"
+       		// 打tag
+       		sh "docker tag ${imageName} ${harborUrl}/${harborRepository}/${imageName}"
+            // 上传镜像
+            withCredentials([usernamePassword(credentialsId: "${harborAuth}", passwordVariable: 'password', usernameVariable: 'username')]) {
+                //登录
+                sh "docker login -u ${username} -p ${password} ${harborUrl}"
+                //上传
+                sh "docker push ${harborUrl}/${harborRepository}/${imageName}"
+            }
+       	 }
+	}
+
+	stage('代码审查'){
+       //定义当前Jenkins的SonarQubeScanner工具
+       def scannerHome = tool 'sonarqube-scanner'
+
+	   for(int i=0;i<validServerList.size();i++){
+           //引用当前JenkinsSonarQube环境
+           withSonarQubeEnv('sonarqube') {
+                sh """cd ${validServerList[i].serverName}
+                ${scannerHome}/bin/sonar-scanner"""
+           }
+	   }
+	}
+
+
+    stage('远程部署'){
+
+        for(int i=0;i<validServerList.size();i++){
+
+           sshPublisher(publishers: [sshPublisherDesc(configName: 'docker_server', transfers: [sshTransfer(cleanRemote: false, excludes: '', execCommand: "/usr/local/shell/jenkins/springcloudDeploy.sh ${harborUrl} ${harborRepository} ${validServerList[i].serverName} ${tag} ${validServerList[i].serverPort}", execTimeout: 120000, flatten: false, makeEmptyDirs: false, noDefaultExcludes: false, patternSeparator: '[, ]+', remoteDirectory: '', remoteDirectorySDF: false, removePrefix: '', sourceFiles: '')], usePromotionTimestamp: false, useWorkspaceInPromotion: false, verbose: false)])
+
+        }
+
+    }
+}
